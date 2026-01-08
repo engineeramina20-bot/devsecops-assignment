@@ -1,77 +1,72 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import sqlite3
-import pickle
-import subprocess
-import hashlib
+import bcrypt
 import os
 import logging
+import hashlib
+from pathlib import Path
 
 app = Flask(__name__)
 
+# Secret via variables d’environnement
+API_KEY = os.environ.get("API_KEY")
 
-API_KEY = "API-KEY-123456"
+logging.basicConfig(level=logging.INFO)
 
+BASE_DIR = Path(__file__).resolve().parent
 
-logging.basicConfig(level=logging.DEBUG)
+def get_db():
+    return sqlite3.connect(BASE_DIR / "users.db")
 
 @app.route("/auth", methods=["POST"])
 def auth():
-    username = request.json.get("username")
-    password = request.json.get("password")
+    data = request.get_json()
+    username = data.get("username")
+    password = data.get("password").encode()
 
-    # SQL Injection
-    conn = sqlite3.connect("users.db")
+    conn = get_db()
     cursor = conn.cursor()
-    query = f"SELECT * FROM users WHERE username='{username}' AND password='{password}'"
-    cursor.execute(query)
 
-    if cursor.fetchone():
-        return {"status": "authenticated"}
-    return {"status": "denied"}
+    # Requête préparée (anti SQL Injection)
+    cursor.execute(
+        "SELECT password FROM users WHERE username = ?",
+        (username,)
+    )
+    row = cursor.fetchone()
+    conn.close()
 
-@app.route("/exec", methods=["POST"])
-def exec_cmd():
-    cmd = request.json.get("cmd")
-    # Command Injection
-    output = subprocess.check_output(cmd, shell=True)
-    return {"output": output.decode()}
-
-@app.route("/deserialize", methods=["POST"])
-def deserialize():
-    data = request.data
-    # Désérialisation dangereuse
-    obj = pickle.loads(data)
-    return {"object": str(obj)}
+    if row and bcrypt.checkpw(password, row[0]):
+        return jsonify({"status": "authenticated"})
+    return jsonify({"status": "denied"}), 401
 
 @app.route("/encrypt", methods=["POST"])
 def encrypt():
     text = request.json.get("text", "")
-    # Chiffrement faible
-    hashed = hashlib.md5(text.encode()).hexdigest()
-    return {"hash": hashed}
+    # Chiffrement fort
+    hashed = hashlib.sha256(text.encode()).hexdigest()
+    return jsonify({"hash": hashed})
 
 @app.route("/file", methods=["POST"])
 def read_file():
     filename = request.json.get("filename")
-    # Path Traversal
-    with open(filename, "r") as f:
-        return {"content": f.read()}
 
-@app.route("/debug", methods=["GET"])
-def debug():
-    # Divulgation d'informations sensibles
-    return {
-        "api_key": API_KEY,
-        "env": dict(os.environ),
-        "cwd": os.getcwd()
-    }
+    safe_path = BASE_DIR / "files" / os.path.basename(filename)
+
+    if not safe_path.exists():
+        return jsonify({"error": "File not found"}), 404
+
+    with open(safe_path, "r") as f:
+        return jsonify({"content": f.read()})
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
 
 @app.route("/log", methods=["POST"])
 def log_data():
     data = request.json
-    # Log Injection
-    logging.info(f"User input: {data}")
-    return {"status": "logged"}
+    logging.info("User action received")
+    return jsonify({"status": "logged"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000)
